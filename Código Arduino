@@ -1,0 +1,309 @@
+//Codigo completo del proyecto
+
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h> // Librería para LCD I2C
+#include <DHT.h>               // Librería para DHT
+#include <Servo.h>             // Librería para el servomotor
+
+// Configuración del DHT11
+#define DHTPIN 3       // Pin donde está conectado el DHT11
+#define DHTTYPE DHT11  // Tipo de sensor DHT
+DHT dht(DHTPIN, DHTTYPE);
+
+// Configuración del LCD
+LiquidCrystal_I2C lcd_1(0x27, 16, 2); // Dirección I2C y tamaño 16x2
+
+// Pines del sensor ultrasónico
+const int triggerPin = 9;
+const int echoPin = 10;
+
+// Pines del LED RGB
+const int redPin = 5;
+const int greenPin = 6;
+const int bluePin = 7;
+
+// Pin del buzzer
+const int buzzerPin = 8;
+
+// Pin del pulsador
+const int buttonPin = 4; // Pulsador conectado al pin D4
+
+// Pin del servomotor
+const int servoPin = 11; // Servomotor conectado al pin D11
+
+// Umbral de distancia en cm
+const int distanciaUmbralAlarma = 100;
+
+// Variables globales
+bool alarmaActiva = false;            // Estado de la alarma
+bool alarmaDesactivadaManual = false; // Bandera de desactivación manual
+unsigned long ultimaActualizacionBuzzer = 0; // Tiempo de la última actualización del buzzer
+int frecuenciaActual = 200;           // Frecuencia inicial del buzzer
+bool aumentandoFrecuencia = true;     // Dirección de la frecuencia
+unsigned long tiempoAlarmaActivada = 0; // Tiempo en que se activó la alarma
+unsigned long tiempoPuertaAbierta = 0; // Tiempo en que la puerta se abrió
+bool puertaAbierta = false;           // Estado de la puerta
+Servo servo;                          // Objeto para controlar el servomotor
+
+void setup() {
+  // Configurar pines
+  pinMode(triggerPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+  pinMode(buzzerPin, OUTPUT);
+  pinMode(redPin, OUTPUT);
+  pinMode(greenPin, OUTPUT);
+  pinMode(bluePin, OUTPUT);
+  pinMode(buttonPin, INPUT_PULLUP); // Activar resistencia de pull-up interna para el botón
+
+  // Inicializar pantalla LCD
+  lcd_1.init();
+  lcd_1.backlight();
+  lcd_1.clear();
+
+  // Inicializar DHT11
+  dht.begin();
+
+  // Inicializar servomotor
+  servo.attach(servoPin);
+  servo.write(0); // Inicialmente la puerta está cerrada
+
+  Serial.begin(9600);
+
+  // Estado inicial del sistema
+  desactivarAlarma();
+}
+
+void loop() {
+  int distancia = medirDistancia();
+  bool boton = leerBoton();
+
+  // Lógica para desactivar manualmente la alarma
+  if (boton && alarmaActiva) {
+    alarmaDesactivadaManual = true;
+    desactivarAlarma();
+  }
+
+  // Si la alarma no está desactivada manualmente, comprobar distancia
+  if (!alarmaDesactivadaManual) {
+    if (distancia > 0 && distancia < distanciaUmbralAlarma) {
+      if (!alarmaActiva) {
+        activarAlarma(distancia);
+      }
+      if (!puertaAbierta) {
+        manejarParpadeoLED();  // Parpadeo en rojo mientras la alarma está activa y la puerta está cerrada
+      }
+      manejarSonidoBuzzer(); // Sonido continuo mientras la alarma está activa
+    } else {
+      if (alarmaActiva) {
+        desactivarAlarma();
+      }
+    }
+  } else {
+    // Si la alarma fue desactivada manualmente, esperar a que la persona se aleje
+    if (distancia > distanciaUmbralAlarma) {
+      alarmaDesactivadaManual = false;
+    }
+  }
+
+  // Lógica para abrir y cerrar la puerta
+  if (alarmaActiva && millis() - tiempoAlarmaActivada >= 15000 && !puertaAbierta) { // 15 segundos de alarma
+    noTone(buzzerPin); // Detener el buzzer
+    abrirPuerta();     // Abrir la puerta
+  }
+
+  if (puertaAbierta && millis() - tiempoPuertaAbierta >= 8000) { // 8 segundos después de abrir la puerta
+    cerrarPuerta(); // Cerrar la puerta
+  }
+
+  delay(100); // Reducir lecturas erráticas
+}
+
+// Función para medir la distancia
+int medirDistancia() {
+  digitalWrite(triggerPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(triggerPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(triggerPin, LOW);
+
+  long duracion = pulseIn(echoPin, HIGH, 30000); // Tiempo máximo de espera ajustado
+  if (duracion == 0) {
+    return -1; // No se detectó ningún objeto
+  }
+  int distancia = duracion * 0.034 / 2; // Convertir a cm
+  return distancia;
+}
+
+// Función para activar la alarma
+void activarAlarma(int distancia) {
+  alarmaActiva = true;
+  tiempoAlarmaActivada = millis(); // Registrar el tiempo de activación de la alarma
+  Serial.println("Alarma activada");
+  mostrarEstado("Alarma");
+
+  // Leer temperatura y humedad
+  float temperatura = dht.readTemperature();
+  float humedad = dht.readHumidity();
+
+  // Verificar errores de lectura del DHT11
+  if (isnan(temperatura) || isnan(humedad)) {
+    temperatura = 0;
+    humedad = 0;
+  }
+
+  // Actualizar LCD
+  lcd_1.clear();
+  lcd_1.setCursor(0, 0);
+  lcd_1.print("Espere 1 minuto!");
+  lcd_1.setCursor(0, 1);
+  lcd_1.print("T:");
+  lcd_1.print(temperatura);
+  lcd_1.print(" H:");
+  lcd_1.print(humedad);
+  lcd_1.print("%");
+}
+
+// Función para desactivar la alarma
+void desactivarAlarma() {
+  alarmaActiva = false;
+  Serial.println("Sistema normal");
+  mostrarEstado("Normal");
+
+  // Actualizar LCD
+  lcd_1.clear();
+  lcd_1.setCursor(0, 0);
+  lcd_1.print("Sistema Normal");
+
+  // Apagar buzzer
+  noTone(buzzerPin);
+
+  // Apagar LED
+  analogWrite(redPin, 0);
+  analogWrite(greenPin, 255);
+  analogWrite(bluePin, 0);
+}
+
+// Función para manejar el parpadeo del LED RGB cuando la alarma está activa
+void manejarParpadeoLED() {
+  static unsigned long tiempoAnterior = 0;
+  static bool ledEncendido = false;
+  unsigned long tiempoActual = millis();
+
+  // Alternar el estado del LED cada 500 ms
+  if (tiempoActual - tiempoAnterior >= 500) {
+    tiempoAnterior = tiempoActual;
+    ledEncendido = !ledEncendido;
+
+    if (ledEncendido) {
+      analogWrite(redPin, 255); // Encender rojo
+      analogWrite(greenPin, 0);
+      analogWrite(bluePin, 0);
+    } else {
+      analogWrite(redPin, 0); // Apagar LED
+      analogWrite(greenPin, 0);
+      analogWrite(bluePin, 0);
+    }
+  }
+}
+
+// Función para manejar el sonido continuo del buzzer
+void manejarSonidoBuzzer() {
+  unsigned long tiempoActual = millis();
+
+  // Cambiar frecuencia cada 100 ms para un efecto más profundo
+  if (tiempoActual - ultimaActualizacionBuzzer >= 100) {
+    ultimaActualizacionBuzzer = tiempoActual;
+
+    // Cambiar frecuencia entre 200 Hz y 500 Hz
+    if (aumentandoFrecuencia) {
+      frecuenciaActual += 50;
+      if (frecuenciaActual >= 500) {
+        aumentandoFrecuencia = false;
+      }
+    } else {
+      frecuenciaActual -= 50;
+      if (frecuenciaActual <= 200) {
+        aumentandoFrecuencia = true;
+      }
+    }
+
+    // Emitir tono con la frecuencia actual
+    tone(buzzerPin, frecuenciaActual);
+  }
+}
+
+// Función para mostrar el estado con LEDs RGB
+void mostrarEstado(String estado) {
+  if (estado == "Alarma") {
+    // Dejar que el parpadeo controle el LED
+  } else if (estado == "Normal") {
+    analogWrite(redPin, 0);
+    analogWrite(greenPin, 255);
+    analogWrite(bluePin, 0);
+  }
+}
+
+// Función para leer el estado del botón con debounce
+bool leerBoton() {
+  static bool estadoAnterior = HIGH;
+  static unsigned long tiempoDebounce = 0;
+  const unsigned long debounceDelay = 50;
+
+  bool lectura = digitalRead(buttonPin);
+
+  if (lectura != estadoAnterior) {
+    tiempoDebounce = millis();
+  }
+
+  if ((millis() - tiempoDebounce) > debounceDelay) {
+    if (lectura == LOW) {
+      estadoAnterior = lectura;
+      return true;
+    }
+  }
+
+  estadoAnterior = lectura;
+  return false;
+}
+
+// Función para abrir la puerta
+void abrirPuerta() {
+  if (!puertaAbierta) { // Solo abrir si la puerta no está ya abierta
+    servo.write(90); // Mover el servomotor a 90 grados (puerta abierta)
+    puertaAbierta = true;
+    tiempoPuertaAbierta = millis(); // Registrar el tiempo en que la puerta se abrió
+    Serial.println("Puerta abierta");
+
+    // Cambiar el LED a azul cuando la puerta se abre
+    analogWrite(redPin, 0);
+    analogWrite(greenPin, 0);
+    analogWrite(bluePin, 255);
+
+    // Detener el buzzer
+    noTone(buzzerPin);
+
+    // Mostrar "Puerta Abierta" en la LCD
+    lcd_1.clear();
+    lcd_1.setCursor(0, 0);
+    lcd_1.print("Puerta Abierta");
+  }
+}
+
+// Función para cerrar la puerta
+void cerrarPuerta() {
+  if (puertaAbierta) { // Solo cerrar si la puerta no está ya cerrada
+    servo.write(0); // Mover el servomotor a 0 grados (puerta cerrada)
+    puertaAbierta = false;
+    Serial.println("Puerta cerrada");
+
+    // Cambiar el LED a verde cuando la puerta se cierra
+    analogWrite(redPin, 0);
+    analogWrite(greenPin, 255);
+    analogWrite(bluePin, 0);
+
+    // Mostrar "Puerta Cerrada" en la LCD
+    lcd_1.clear();
+    lcd_1.setCursor(0, 0);
+    lcd_1.print("Puerta Cerrada");
+  }
+}
